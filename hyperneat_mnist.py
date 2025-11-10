@@ -1,139 +1,113 @@
 import neat
-import numpy as np
-from tensorflow.keras.datasets import mnist
-from sklearn.preprocessing import MinMaxScaler
-import math
-import pickle
+import matplotlib.pyplot as plt
+import statistics
 
-# ---------- Параметры HyperNEAT ----------
-INPUT_SIZE = 28  # 28x28
-OUTPUT_SIZE = 10
-LINK_THRESHOLD = 0.1   # порог для создания связи (по абсолютному значению веса)
-TRAIN_SUBSET = 5000    # для ускорения
-TEST_SUBSET = 100
-GENERATIONS = 50
+xor_inputs = [(0, 0), (0, 1), (1, 0), (1, 1)]
+xor_outputs = [(0,), (1,), (1,), (0,)]
 
-# ---------- Загрузка MNIST ----------
-(x_train, y_train), (x_test, y_test) = mnist.load_data()
-x_train = x_train.reshape((x_train.shape[0], -1)).astype(np.float32)
-x_test = x_test.reshape((x_test.shape[0], -1)).astype(np.float32)
+def eval_genomes(genomes, config, generation):
+    for genome_id, genome in genomes:
+        genome.fitness = 4.0
+        net = neat.nn.FeedForwardNetwork.create(genome, config)
+        for xi, xo in zip(xor_inputs, xor_outputs):
+            output = net.activate(xi)
+            genome.fitness -= (output[0] - xo[0]) ** 2
 
-scaler = MinMaxScaler()
-x_train = scaler.fit_transform(x_train)
-x_test = scaler.transform(x_test)
+        # Поощрение расширения до 50-го поколения, дальше сжатие
+        if generation <= 50:
+            nodes_bonus = len(genome.nodes) * 0.5
+            conns_bonus = len(genome.connections) * 0.2
+            genome.fitness += (nodes_bonus + conns_bonus)
+        else:
+            nodes_penalty = len(genome.nodes) * 0.05
+            conns_penalty = len(genome.connections) * 0.02
+            genome.fitness -= (nodes_penalty + conns_penalty)
 
-x_train_small = x_train[:TRAIN_SUBSET]
-y_train_small = y_train[:TRAIN_SUBSET]
-x_test_small = x_test[:TEST_SUBSET]
-y_test_small = y_test[:TEST_SUBSET]
+def plot_stats(stats, accuracy_history):
+    generations = list(range(len(stats.generation_statistics)))
+    best_fitness = stats.get_fitness_stat(max)
+    mean_fitness = stats.get_fitness_stat(statistics.mean)
 
-# ---------- Подготовка координат субстрата ----------
-# Входы: координаты пикселя в диапазоне [-1, 1]
-input_coords = []
-for r in range(INPUT_SIZE):
-    for c in range(INPUT_SIZE):
-        # нормируем в [-1,1]
-        x = (c / (INPUT_SIZE - 1)) * 2.0 - 1.0
-        y = (r / (INPUT_SIZE - 1)) * 2.0 - 1.0
-        input_coords.append((x, y))
-assert len(input_coords) == INPUT_SIZE * INPUT_SIZE
+    # Количество нейронов у лучших геномов каждого поколения
+    best_genomes = stats.most_fit_genomes
+    node_counts = [len(genome.nodes) for genome in best_genomes]
 
-# Выходы: разместим по линии (или по сетке); используем 1D равномерно в [-1,1]
-output_coords = []
-for i in range(OUTPUT_SIZE):
-    t = (i / (OUTPUT_SIZE - 1)) * 2.0 - 1.0
-    output_coords.append((t, 0.0))
+    plt.figure(figsize=(18, 4))
 
+    plt.subplot(1, 3, 1)
+    plt.plot(generations, best_fitness, label="Best Fitness")
+    plt.plot(generations, mean_fitness, label="Mean Fitness")
+    plt.xlabel("Generation")
+    plt.ylabel("Fitness")
+    plt.title("Fitness per Generation")
+    plt.legend()
 
-# ---------- Функция, которая по CPPN создаёт матрицу весов input->output ----------
-def cppn_to_weights(cppn, input_coords, output_coords, link_threshold=LINK_THRESHOLD):
-    n_in = len(input_coords)
-    n_out = len(output_coords)
-    weights = np.zeros((n_out, n_in), dtype=np.float32)  # weights[j,i]
-    for j, outc in enumerate(output_coords):
-        x2, y2 = outc
-        for i, inc in enumerate(input_coords):
-            x1, y1 = inc
-            inputs = [x1, y1, x2, y2, 1.0]  # bias
-            # CPPN -> два выхода: raw_weight, existence_score (или просто weight + threshold)
-            out = cppn.activate(inputs)
-            raw_w = out[0]
-            # optional second output could be used as existence gate: ex = out[1]
-            # ex = out[1]
-            # Используем порог по абсолютному значению
-            if abs(raw_w) >= link_threshold:
-                weights[j, i] = raw_w
-            else:
-                weights[j, i] = 0.0
-    return weights
+    plt.subplot(1, 3, 2)
+    plt.plot(generations, node_counts, label="Nodes in Best Genome")
+    plt.xlabel("Generation")
+    plt.ylabel("Node count")
+    plt.title("Nodes per Generation")
+    plt.legend()
 
+    plt.subplot(1, 3, 3)
+    plt.plot(generations, accuracy_history, label="Accuracy (best genome)")
+    plt.ylim([0, 1.01])
+    plt.xlabel("Generation")
+    plt.ylabel("Accuracy")
+    plt.title("XOR Accuracy per Generation")
+    plt.legend()
 
-# ---------- Простая функция предсказания (feedforward без активации скрытых узлов) ----------
-def predict_with_weights(weights, x):
-    # x: (n_in,) in [0,1] - входные пиксели
-    # weights: shape (n_out, n_in)
-    logits = weights.dot(x)  # shape (n_out,)
-    # softmax
-    exps = np.exp(logits - np.max(logits))
-    probs = exps / np.sum(exps)
-    return probs
+    plt.tight_layout()
+    plt.show()
 
+def run(config_file):
+    config = neat.Config(
+        neat.DefaultGenome, neat.DefaultReproduction,
+        neat.DefaultSpeciesSet, neat.DefaultStagnation,
+        config_file
+    )
+    p = neat.Population(config)
+    p.add_reporter(neat.StdOutReporter(True))
+    stats = neat.StatisticsReporter()
+    p.add_reporter(stats)
 
-# ---------- Fitness: точность на подмножестве ----------
-def evaluate_cppn_fitness(genome, config):
-    cppn = neat.nn.FeedForwardNetwork.create(genome, config)
-    weights = cppn_to_weights(cppn, input_coords, output_coords, link_threshold=LINK_THRESHOLD)
+    accuracy_history = []
+    for generation in range(100):
+        # Динамическое изменение вероятностей мутаций
+        if generation < 50:
+            config.genome_config.node_add_prob = 0.9
+            config.genome_config.node_delete_prob = 0.1
+            config.genome_config.conn_add_prob = 0.9
+            config.genome_config.conn_delete_prob = 0.1
+        else:
+            config.genome_config.node_add_prob = 0.1
+            config.genome_config.node_delete_prob = 0.9
+            config.genome_config.conn_add_prob = 0.1
+            config.genome_config.conn_delete_prob = 0.9
 
-    correct = 0
-    for xi, yi in zip(x_train_small, y_train_small):
-        probs = predict_with_weights(weights, xi)
-        pred = np.argmax(probs)
-        if pred == yi:
-            correct += 1
-    accuracy = correct / len(x_train_small)
-    return accuracy
+        p.run(lambda g, c: eval_genomes(g, c, generation), 1)
 
+        # Accuracy за поколение (лучший genome)
+        best_genome = stats.most_fit_genomes[-1]
+        net = neat.nn.FeedForwardNetwork.create(best_genome, config)
+        correct = 0
+        for xi, xo in zip(xor_inputs, xor_outputs):
+            y = net.activate(xi)[0]
+            predicted = int(y > 0.5)
+            if predicted == xo[0]:
+                correct += 1
+        accuracy = correct / 4.0
+        accuracy_history.append(accuracy)
 
-def eval_genomes(genomes, config):
-    for gid, genome in genomes:
-        genome.fitness = evaluate_cppn_fitness(genome, config)
-    best_genome = max(genomes, key=lambda g: g[1].fitness)[1]
-    print(f"Generation best genome {best_genome.key}: nodes={len(best_genome.nodes)}, "
-          f"connections={len(best_genome.connections)}, fitness={best_genome.fitness:.3f}")
+    winner = stats.most_fit_genomes[-1]
+    print('\nBest genome:\n{!s}'.format(winner))
+    winner_net = neat.nn.FeedForwardNetwork.create(winner, config)
+    print("\nBest genome XOR test results:")
+    for xi, xo in zip(xor_inputs, xor_outputs):
+        output = winner_net.activate(xi)
+        print(f"input={xi}, expected={xo[0]}, got={output[0]:.3f}")
 
-# ---------- Настройка NEAT ----------
-config_path = "config.txt"  # файл конфигурации (см. выше)
-config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction,
-                     neat.DefaultSpeciesSet, neat.DefaultStagnation,
-                     config_path)
+    plot_stats(stats, accuracy_history)
 
-pop = neat.Population(config)
-pop.add_reporter(neat.StdOutReporter(True))
-stats = neat.StatisticsReporter()
-pop.add_reporter(stats)
-
-# ---------- Эволюция ----------
-winner = pop.run(eval_genomes, GENERATIONS)
-
-# ---------- Сохранение победителя ----------
-with open("hyperneat_cppn_winner.pkl", "wb") as f:
-    pickle.dump(winner, f)
-
-print("=== WINNER ID:", winner.key if hasattr(winner, "key") else "genome")
-
-# ---------- Тестирование победителя ----------
-winner_net = neat.nn.FeedForwardNetwork.create(winner, config)
-best_weights = cppn_to_weights(winner_net, input_coords, output_coords, link_threshold=LINK_THRESHOLD)
-
-correct = 0
-for xi, yi in zip(x_test_small, y_test_small):
-    probs = predict_with_weights(best_weights, xi)
-    pred = np.argmax(probs)
-    if pred == yi:
-        correct += 1
-acc = correct / len(x_test_small)
-print(f"Test accuracy (subset): {acc:.4f}")
-
-# Сохраним веса
-np.save("hyperneat_best_weights.npy", best_weights)
-print("Saved best weights to hyperneat_best_weights.npy")
+if __name__ == '__main__':
+    run('config.txt')
