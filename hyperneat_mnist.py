@@ -13,14 +13,13 @@ def eval_genomes(genomes, config, generation):
             output = net.activate(xi)
             genome.fitness -= (output[0] - xo[0]) ** 2
 
-        # Поощрение расширения до 50-го поколения, дальше сжатие
         if generation <= 50:
-            nodes_bonus = len(genome.nodes) * 0.5
-            conns_bonus = len(genome.connections) * 0.2
+            nodes_bonus = len(genome.nodes) * 0.1 * generation/50
+            conns_bonus = len(genome.connections) * 0.1 * generation/50
             genome.fitness += (nodes_bonus + conns_bonus)
         else:
-            nodes_penalty = len(genome.nodes) * 0.05
-            conns_penalty = len(genome.connections) * 0.02
+            nodes_penalty = len(genome.nodes) * 0.05 * generation/50
+            conns_penalty = len(genome.connections) * 0.02 * generation/50
             genome.fitness -= (nodes_penalty + conns_penalty)
 
 def plot_stats(stats, accuracy_history):
@@ -73,17 +72,19 @@ def run(config_file):
 
     accuracy_history = []
     for generation in range(100):
-        # Динамическое изменение вероятностей мутаций
         if generation < 50:
-            config.genome_config.node_add_prob = 0.9
-            config.genome_config.node_delete_prob = 0.1
-            config.genome_config.conn_add_prob = 0.9
-            config.genome_config.conn_delete_prob = 0.1
+            factor = generation / 50
+            config.genome_config.node_add_prob = 0.7 * (1 - factor) + 0.1 * factor
+            config.genome_config.node_delete_prob = 0.1 * (1 - factor) + 0.7 * factor
+            config.genome_config.conn_add_prob = 0.7 * (1 - factor) + 0.1 * factor
+            config.genome_config.conn_delete_prob = 0.1 * (1 - factor) + 0.7 * factor
         else:
+            # Зафиксировать на конечных значениях
             config.genome_config.node_add_prob = 0.1
-            config.genome_config.node_delete_prob = 0.9
+            config.genome_config.node_delete_prob = 0.7
             config.genome_config.conn_add_prob = 0.1
-            config.genome_config.conn_delete_prob = 0.9
+            config.genome_config.conn_delete_prob = 0.7
+
 
         p.run(lambda g, c: eval_genomes(g, c, generation), 1)
 
@@ -106,7 +107,7 @@ def run(config_file):
     for xi, xo in zip(xor_inputs, xor_outputs):
         output = winner_net.activate(xi)
         print(f"input={xi}, expected={xo[0]}, got={output[0]:.3f}")
-
+    print(accuracy_history)
     plot_stats(stats, accuracy_history)
 
 if __name__ == '__main__':
